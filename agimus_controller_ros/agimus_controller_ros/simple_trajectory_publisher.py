@@ -79,7 +79,9 @@ class TrajectoryPublisherBase(Node):
         self.moving_joint_names = None
         self._free_flyer = None
         self._planar_base = None
-        self._agimus_params_fetched = False  # True only after _on_agimus_params succeeds
+        self._agimus_params_fetched = (
+            False  # True only after _on_agimus_params succeeds
+        )
 
         self._lfc_param_client = self.create_client(
             GetParameters, "/linear_feedback_controller/get_parameters"
@@ -278,7 +280,9 @@ class TrajectoryPublisherBase(Node):
                 )
                 return
             self._agimus_params_fetched = True
-            self.get_logger().info("[Step 2 done] agimus_controller_node params fetched.")
+            self.get_logger().info(
+                "[Step 2 done] agimus_controller_node params fetched."
+            )
 
         # Step 3: wait for robot description and first joint state.
         if self.robot_description_msg is None or self.q0 is None:
@@ -287,7 +291,9 @@ class TrajectoryPublisherBase(Node):
             )
             return
 
-        self.get_logger().info("[Step 3 done] robot model and q0 ready. Loading models...")
+        self.get_logger().info(
+            "[Step 3 done] robot model and q0 ready. Loading models..."
+        )
         self._load_models()
         self.destroy_timer(self.timer)
         self.ready_callback()
