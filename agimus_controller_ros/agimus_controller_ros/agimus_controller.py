@@ -483,11 +483,11 @@ class AgimusController(Node, RobotModelsMixin):
         self.control_publisher.publish(control_numpy_to_msg(ctrl_msg))
 
         if self.params.planar_base:
-            base_u = ocp_res.feed_forward_terms[0][:3]
+            base_v = self.traj_buffer[0].point.robot_velocity[:3]
             twist = Twist()
-            twist.linear.x = base_u[0]
-            twist.linear.y = base_u[1]
-            twist.angular.z = base_u[2]
+            twist.linear.x = base_v[0]
+            twist.linear.y = base_v[1]
+            twist.angular.z = base_v[2]
             self.base_cmd_vel_publisher.publish(twist)
 
     def initialization_callback(self) -> None:
