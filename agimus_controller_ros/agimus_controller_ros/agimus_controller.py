@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import numpy as np
+import pinocchio as pin
 import time
 import os
 import resource_retriever
@@ -50,6 +51,12 @@ from agimus_controller_ros.ros_utils import (
 
 from agimus_controller.trajectory import TrajectoryBuffer, TrajectoryPoint
 from agimus_controller_ros.agimus_controller_parameters import agimus_controller_params
+
+# TODO(tiago-pro-force-feedback): promote to a declared ROS parameter (would
+# require regenerating agimus_controller_parameters.py/.yaml via
+# generate_parameter_library). Must match the `contact_name` param of
+# agimus_demo_07_fixed_tiago_pro_deburring/scripts/force_sensor_filter.py.
+_FORCE_CONTACT_NAME = "wrist_right_ft_sensor_link"
 
 
 class RobotModelsMixin:
@@ -384,6 +391,23 @@ class AgimusController(Node, RobotModelsMixin):
         """Update the sensor_msg attribute of the class."""
         self.sensor_msg = sensor_msg
 
+    def _contact_force(self, np_sensor_msg: lfc_py_types.Sensor) -> pin.Force | None:
+        """Extract the F/T sensor reading from Sensor.contacts as a pin.Force.
+
+        Looks up the contact named `_FORCE_CONTACT_NAME` (populated upstream
+        by force_sensor_filter.py, not by the LFC itself). Returns None if
+        absent — e.g. running without the force filter node, or on a robot
+        with no F/T sensor wired up. Note this is a bare pin.Force, not a
+        dict — TrajectoryPoint.forces takes different shapes depending on
+        whether the point is x0 (bare Force, see
+        warm_start_shift_previous_solution_force_feedback.py) or a reference
+        point (dict[frame_id, Force], see ocp_croco_generic_force_feedback.py).
+        """
+        for contact in np_sensor_msg.contacts:
+            if contact.name == _FORCE_CONTACT_NAME:
+                return pin.Force(contact.wrench)
+        return None
+
     def mpc_input_callback(self, msg: MpcInput) -> None:
         """Fill the new point msg in the trajectory buffer."""
         w_traj_point = mpc_msg_to_weighted_traj_point(
@@ -514,6 +538,7 @@ class AgimusController(Node, RobotModelsMixin):
             robot_configuration=self.np_sensor_msg.joint_state.position,
             robot_velocity=self.np_sensor_msg.joint_state.velocity,
             robot_acceleration=np.zeros_like(self.np_sensor_msg.joint_state.velocity),
+            forces=self._contact_force(self.np_sensor_msg),
         )
         if self.params.constant_delay and control is not None:
             # Compensate for delay by estimating the future state.
