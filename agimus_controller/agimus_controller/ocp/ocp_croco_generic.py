@@ -229,9 +229,8 @@ class ResidualModelFramePlacementStatic(ResidualModel):
     pref: T.Optional[npt.NDArray[np.float64]] = None
 
     def update(self, data, obj, pt: WeightedTrajectoryPoint):
-        assert len(pt.point.end_effector_poses) == 1, (
-            f"ResidualModelFramePlacementStatic requires exactly one end-effector pose, current is {pt.point.end_effector_poses}."
-        )
+        # See ResidualModelFrameTranslationStatic.update() — same fix, same
+        # reason (project_demo07_force_feedback_scoping memory).
         assert self.frame_id in pt.point.end_effector_poses, (
             f"ResidualModelFramePlacementStatic: end_effector_poses should contain the key {self.frame_id}"
         )
@@ -283,9 +282,12 @@ class ResidualModelFrameTranslationStatic(ResidualModel):
     pref: T.Optional[npt.NDArray[np.float64]] = None
 
     def update(self, data, obj, pt: WeightedTrajectoryPoint):
-        assert len(pt.point.end_effector_poses) == 1, (
-            f"ResidualModelFrameTranslation requires exactly one end-effector pose, current is {pt.point.end_effector_poses}."
-        )
+        # Looked up by frame_id (not positional) — despite the class docstring
+        # ("for multi end effector support"), this used to also assert
+        # len(pt.point.end_effector_poses) == 1, which defeated that support
+        # and broke as soon as a second, non-pose-tracked entry (e.g. a
+        # force-only frame) appeared in end_effector_poses. See
+        # project_demo07_force_feedback_scoping memory.
         assert self.frame_id in pt.point.end_effector_poses, (
             f"end_effector_poses should contains key {self.frame_id}"
         )
@@ -337,9 +339,8 @@ class ResidualModelFrameRotationStatic(ResidualModel):
     pref: T.Optional[npt.NDArray[np.float64]] = None
 
     def update(self, data, obj, pt: WeightedTrajectoryPoint):
-        assert len(pt.point.end_effector_poses) == 1, (
-            f"ResidualModelFrameRotationStatic requires exactly one end-effector pose, current is {pt.point.end_effector_poses}."
-        )
+        # See ResidualModelFrameTranslationStatic.update() — same fix, same
+        # reason (project_demo07_force_feedback_scoping memory).
         assert self.frame_id in pt.point.end_effector_poses, (
             f"ResidualModelFrameRotationStatic: end_effector_poses should contain the key {self.frame_id}"
         )
@@ -412,9 +413,8 @@ class ResidualModelFrameVelocityStatic(ResidualModel):
         )
 
     def update(self, data, obj, pt: WeightedTrajectoryPoint):
-        assert len(pt.point.end_effector_velocities) == 1, (
-            f"ResidualModelFrameVelocityStatic requires exactly one end-effector velocity, current is {pt.point.end_effector_velocities}."
-        )
+        # See ResidualModelFrameTranslationStatic.update() — same fix, same
+        # reason (project_demo07_force_feedback_scoping memory).
         assert self.frame_id in pt.point.end_effector_velocities, (
             f"ResidualModelFrameVelocityStatic: end_effector_velocities should contain the key {self.frame_id}"
         )
@@ -452,9 +452,8 @@ class ResidualModelVisualServoing(ResidualModel):
     robot_frame: str
 
     def update(self, data: BuildData, obj, pt: WeightedTrajectoryPoint):
-        assert len(pt.point.end_effector_poses) == 1, (
-            f"ResidualModelVisualServoing requires exactly one end-effector, current is {pt.point.end_effector_poses}."
-        )
+        # See ResidualModelFrameTranslationStatic.update() — same fix, same
+        # reason (project_demo07_force_feedback_scoping memory).
         assert self.input_key in pt.point.end_effector_poses, (
             f"end_effector_poses should contains key {self.input_key}"
         )
