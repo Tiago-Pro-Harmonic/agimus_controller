@@ -376,6 +376,10 @@ class AgimusController(Node, RobotModelsMixin):
                 "class"
             ]
         use_force_feedback = running_diff_class == "DAMSoftContactAugmentedFwdDynamics"
+        # Stashed on self: setup_mpc_initial_guess() needs it too, to augment
+        # x0/x_init with the force component (WarmStartReference doesn't know
+        # about the augmented state — see that method for details).
+        self.use_force_feedback = use_force_feedback
 
         if use_force_feedback:
             add_modules(get_globals())
@@ -409,6 +413,7 @@ class AgimusController(Node, RobotModelsMixin):
             robot_configuration=np_sensor_msg.joint_state.position,
             robot_velocity=np_sensor_msg.joint_state.velocity,
             robot_acceleration=np.zeros_like(np_sensor_msg.joint_state.velocity),
+            forces=self._contact_force(np_sensor_msg),
         )
         reference_trajectory = self.traj_buffer.horizon
         if len(self.ocp.input_transforms) > 0:
@@ -419,6 +424,28 @@ class AgimusController(Node, RobotModelsMixin):
 
         reference_trajectory_points = [el.point for el in reference_trajectory]
         x0, x_init, u_init = ws_ref.generate(initial_state, reference_trajectory_points)
+
+        # WarmStartReference always returns the plain [q, v] state (no concept
+        # of the augmented [q, v, f] state) — augment it here for the
+        # force-feedback case, same force-slicing logic as
+        # WarmStartShiftPreviousSolutionForceFeedback.generate() (crocoddyl
+        # otherwise rejects x0 with a size mismatch: 14 vs 17). See
+        # project_demo07_force_feedback_scoping memory.
+        if self.use_force_feedback:
+            enabled = self.ocp.enabled_directions
+            force = initial_state.forces
+            if force is None:
+                self.get_logger().warn(
+                    f"No '{_FORCE_CONTACT_NAME}' contact in the first Sensor "
+                    "message — using zero force for the initial guess."
+                )
+                force = pin.Force.Zero()
+            force_component = (
+                force.linear if sum(enabled) > 1 else force.linear[enabled]
+            )
+            x0 = np.concatenate([x0, force_component])
+            x_init = [np.concatenate([x, force_component]) for x in x_init]
+
         self.ocp.solve(x0, x_init, u_init, use_iteration_limits_and_timeout=False)
         self._ws_shift.update_previous_solution(self.ocp.ocp_results)
 
