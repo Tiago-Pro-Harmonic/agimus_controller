@@ -7,6 +7,7 @@ import rclpy.duration
 import resource_retriever
 import sys
 import argparse
+import yaml
 
 import threading
 import matplotlib.pyplot as plt
@@ -24,7 +25,11 @@ from tf2_ros import TransformException
 from tf2_ros.buffer import Buffer
 from tf2_ros.transform_listener import TransformListener
 
-from agimus_controller.ocp.ocp_croco_generic import OCPCrocoGeneric
+from agimus_controller.ocp.ocp_croco_generic import OCPCrocoGeneric, add_modules
+from agimus_controller.ocp.ocp_croco_generic_force_feedback import (
+    OCPCrocoForceFeedbackGeneric,
+    get_globals,
+)
 from agimus_controller.ocp_param_base import OCPParamsBaseCroco, DTFactorsNSeq
 from agimus_controller.trajectory import (
     WeightedTrajectoryPoint,
@@ -232,7 +237,21 @@ class MPCDebuggerNode(Node, RobotModelsMixin):
         else:
             yaml_file = resource_retriever.get_filename(yaml_file, use_protocol=False)
         self.get_logger().info(f"Loading OCP definition file {yaml_file}")
-        self._ocp = OCPCrocoGeneric(self.robot_models, ocp_params, yaml_file)
+
+        # See agimus_controller.py's setup_mpc() for why this is auto-detected
+        # from the yaml rather than hardcoded (project_demo07_force_feedback_scoping
+        # memory).
+        with open(yaml_file, "r") as f:
+            running_diff_class = yaml.safe_load(f)["running_model"]["differential"][
+                "class"
+            ]
+        if running_diff_class == "DAMSoftContactAugmentedFwdDynamics":
+            add_modules(get_globals())
+            self._ocp = OCPCrocoForceFeedbackGeneric(
+                self.robot_models, ocp_params, yaml_file
+            )
+        else:
+            self._ocp = OCPCrocoGeneric(self.robot_models, ocp_params, yaml_file)
 
         if len(self._ocp.input_transforms) > 0:
             self._tf_buffer = Buffer()

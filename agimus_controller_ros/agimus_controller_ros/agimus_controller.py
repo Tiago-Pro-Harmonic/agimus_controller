@@ -4,6 +4,7 @@ import pinocchio as pin
 import time
 import os
 import resource_retriever
+import yaml
 from functools import partial
 
 import rclpy
@@ -31,11 +32,18 @@ from sensor_msgs.msg import JointState
 
 from agimus_controller.mpc import MPC
 from agimus_controller.mpc_data import OCPResults
-from agimus_controller.ocp.ocp_croco_generic import OCPCrocoGeneric
+from agimus_controller.ocp.ocp_croco_generic import OCPCrocoGeneric, add_modules
+from agimus_controller.ocp.ocp_croco_generic_force_feedback import (
+    OCPCrocoForceFeedbackGeneric,
+    get_globals,
+)
 from agimus_controller.ocp_param_base import OCPParamsBaseCroco
 from agimus_controller.warm_start_reference import WarmStartReference
 from agimus_controller.warm_start_shift_previous_solution import (
     WarmStartShiftPreviousSolution,
+)
+from agimus_controller.warm_start_shift_previous_solution_force_feedback import (
+    WarmStartShiftPreviousSolutionForceFeedback,
 )
 from agimus_controller.factory.robot_model import RobotModels, RobotModelParameters
 
@@ -352,13 +360,40 @@ class AgimusController(Node, RobotModelsMixin):
         else:
             yaml_file = resource_retriever.get_filename(yaml_file, use_protocol=False)
         self.get_logger().info(f"Loading OCP definition file {yaml_file}")
-        self.ocp = OCPCrocoGeneric(self.robot_models, self.ocp_params, yaml_file)
+
+        # Auto-detect force-feedback OCPs (running_model.differential.class ==
+        # DAMSoftContactAugmentedFwdDynamics) from the yaml itself, rather than
+        # a hardcoded/global switch: this node is shared across every TIAGo Pro
+        # demo (02, 03, 05, 07...), and while OCPCrocoForceFeedbackGeneric is a
+        # safe superset of OCPCrocoGeneric (only adds class registrations,
+        # nothing removed/overridden), WarmStartShiftPreviousSolutionForceFeedback
+        # is NOT backward-compatible — its setup() reads
+        # model.differential.enabled_directions, which only exists on the
+        # soft-contact differential class and would crash on a standard yaml.
+        # See project_demo07_force_feedback_scoping memory.
+        with open(yaml_file, "r") as f:
+            running_diff_class = yaml.safe_load(f)["running_model"]["differential"][
+                "class"
+            ]
+        use_force_feedback = running_diff_class == "DAMSoftContactAugmentedFwdDynamics"
+
+        if use_force_feedback:
+            add_modules(get_globals())
+            self.ocp = OCPCrocoForceFeedbackGeneric(
+                self.robot_models, self.ocp_params, yaml_file
+            )
+        else:
+            self.ocp = OCPCrocoGeneric(self.robot_models, self.ocp_params, yaml_file)
 
         if len(self.ocp.input_transforms) > 0:
             self.initialize_tf_listener()
 
-        self._ws_shift = WarmStartShiftPreviousSolution()
-        self._ws_shift.setup(self.robot_models, self.ocp_params)
+        if use_force_feedback:
+            self._ws_shift = WarmStartShiftPreviousSolutionForceFeedback()
+            self._ws_shift.setup(self.robot_models, self.ocp_params, yaml_file)
+        else:
+            self._ws_shift = WarmStartShiftPreviousSolution()
+            self._ws_shift.setup(self.robot_models, self.ocp_params)
 
         self.mpc = MPC()
         self.mpc.setup(ocp=self.ocp, warm_start=self._ws_shift, buffer=self.traj_buffer)
