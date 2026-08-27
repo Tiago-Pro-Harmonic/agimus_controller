@@ -40,15 +40,6 @@ class DAMSoftContactAugmentedFwdDynamics(DifferentialActionModel):
     enabled_directions: tuple[bool, bool, bool] = (True, True, True)
     ref: str = "LOCAL"
     cost_ref: str = "LOCAL"
-    # Runtime gate, NOT a yaml field. agimus_controller sets this False each
-    # MPC cycle when force_sensor_filter.py reports no contact (Contact.active
-    # is a hysteresis detector on the real F/T reading). While False, update()
-    # keeps the force cost inactive regardless of the reference f_weight — so
-    # the OCP never chases a force target with no surface to react against
-    # (which otherwise walks the arm forward indefinitely; the p2-without-wall
-    # runaway). Default True = no gating (other demos, or running without the
-    # force filter node). See OCPCrocoForceFeedbackGeneric.force_tracking_enabled.
-    force_tracking_enabled: bool = True
 
     def __post_init__(self):
         assert force_feedback_mpc is not None, "Module force_feedback_mpc not found"
@@ -151,8 +142,13 @@ class DAMSoftContactAugmentedFwdDynamics(DifferentialActionModel):
         assert self.frame_id in pt.point.forces, (
             f"forces should contains key {self.frame_id}"
         )
+        # A non-zero reference f_weight turns the soft-contact dynamics on for
+        # this node (dam.active_contact). In the guarded-move design that
+        # weight is a tiny marker (contact.w_force_marker) with f_des = 0 —
+        # the force is bounded by the IAM's |f| box constraint (force_lb/ub),
+        # not driven toward a setpoint by this cost.
         f_weight = pt.weights.w_forces[self.frame_id][:3]
-        if self.force_tracking_enabled and np.sum(np.abs(f_weight)) > 1e-9:
+        if np.sum(np.abs(f_weight)) > 1e-9:
             dam.active_contact = True
             dam.with_force_cost = True
             dam.f_des = pt.point.forces[self.frame_id].linear[self.enabled_directions]
@@ -200,27 +196,39 @@ class IAMSoftContactAugmented(IntegratedActionModelAbstract):
         iam = force_feedback_mpc.IAMSoftContactAugmented(
             differential, self.step_time, self.with_cost_residual
         )
-        # If no bounds are set, use the default ones
         force_dimension = sum(self.differential.enabled_directions)
+        # Whether the yaml asked for an explicit box constraint on the contact
+        # force. If so, wire force_feedback_mpc's native force box constraint
+        # (|f| kept within [force_lb, force_ub] over the horizon by SolverCSQP)
+        # — this is the "force ceiling" of the guarded-move press, not a
+        # setpoint. Left off (defaults from the IAM) when the yaml is silent,
+        # so other demos are unaffected.
+        user_force_box = self.force_ub is not None or self.force_lb is not None
+
         if self.force_ub is None:
-            self.force_ub = iam.g_ub[-force_dimension:]
+            self.force_ub = np.asarray(iam.g_ub[-force_dimension:])
         else:
             assert len(self.force_ub) == force_dimension, (
                 "Upper bound for forces does not match number "
                 "of enabled force directions in Differential Action Model! "
                 f"Value has {len(self.force_ub)} elements, while should have {force_dimension}"
             )
-            self.force_ub = np.array(self.force_ub)
+            self.force_ub = np.asarray(self.force_ub, dtype=float)
 
         if self.force_lb is None:
-            self.force_lb = iam.g_lb[-force_dimension:]
+            self.force_lb = np.asarray(iam.g_lb[-force_dimension:])
         else:
             assert len(self.force_lb) == force_dimension, (
                 "Lower bound for forces does not match number "
                 "of enabled force directions in Differential Action Model!"
                 f"Value has {len(self.force_lb)} elements, while should have {force_dimension}"
             )
-            self.force_lb = np.array(self.force_lb)
+            self.force_lb = np.asarray(self.force_lb, dtype=float)
+
+        if user_force_box:
+            iam.with_force_constraint = True
+            iam.force_lb = self.force_lb
+            iam.force_ub = self.force_ub
         return iam
 
 
@@ -304,20 +312,6 @@ class OCPCrocoForceFeedbackGeneric(OCPCrocoGeneric):
     @property
     def oPc(self) -> npt.ArrayLike:
         return np.asarray(self._data.running_model.differential.oPc)
-
-    @property
-    def force_tracking_enabled(self) -> bool:
-        """When False, the OCP holds the force cost inactive on every node
-        regardless of the reference f_weight. Set it False while no contact
-        is detected (Contact.active) so f_des is never chased in free space —
-        see DAMSoftContactAugmentedFwdDynamics.force_tracking_enabled."""
-        return self._data.running_model.differential.force_tracking_enabled
-
-    @force_tracking_enabled.setter
-    def force_tracking_enabled(self, value: bool) -> None:
-        enabled = bool(value)
-        self._data.running_model.differential.force_tracking_enabled = enabled
-        self._data.terminal_model.differential.force_tracking_enabled = enabled
 
 
 def get_globals():
