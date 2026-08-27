@@ -40,6 +40,15 @@ class DAMSoftContactAugmentedFwdDynamics(DifferentialActionModel):
     enabled_directions: tuple[bool, bool, bool] = (True, True, True)
     ref: str = "LOCAL"
     cost_ref: str = "LOCAL"
+    # Runtime gate, NOT a yaml field. agimus_controller sets this False each
+    # MPC cycle when force_sensor_filter.py reports no contact (Contact.active
+    # is a hysteresis detector on the real F/T reading). While False, update()
+    # keeps the force cost inactive regardless of the reference f_weight — so
+    # the OCP never chases a force target with no surface to react against
+    # (which otherwise walks the arm forward indefinitely; the p2-without-wall
+    # runaway). Default True = no gating (other demos, or running without the
+    # force filter node). See OCPCrocoForceFeedbackGeneric.force_tracking_enabled.
+    force_tracking_enabled: bool = True
 
     def __post_init__(self):
         assert force_feedback_mpc is not None, "Module force_feedback_mpc not found"
@@ -143,7 +152,7 @@ class DAMSoftContactAugmentedFwdDynamics(DifferentialActionModel):
             f"forces should contains key {self.frame_id}"
         )
         f_weight = pt.weights.w_forces[self.frame_id][:3]
-        if np.sum(np.abs(f_weight)) > 1e-9:
+        if self.force_tracking_enabled and np.sum(np.abs(f_weight)) > 1e-9:
             dam.active_contact = True
             dam.with_force_cost = True
             dam.f_des = pt.point.forces[self.frame_id].linear[self.enabled_directions]
@@ -295,6 +304,20 @@ class OCPCrocoForceFeedbackGeneric(OCPCrocoGeneric):
     @property
     def oPc(self) -> npt.ArrayLike:
         return np.asarray(self._data.running_model.differential.oPc)
+
+    @property
+    def force_tracking_enabled(self) -> bool:
+        """When False, the OCP holds the force cost inactive on every node
+        regardless of the reference f_weight. Set it False while no contact
+        is detected (Contact.active) so f_des is never chased in free space —
+        see DAMSoftContactAugmentedFwdDynamics.force_tracking_enabled."""
+        return self._data.running_model.differential.force_tracking_enabled
+
+    @force_tracking_enabled.setter
+    def force_tracking_enabled(self, value: bool) -> None:
+        enabled = bool(value)
+        self._data.running_model.differential.force_tracking_enabled = enabled
+        self._data.terminal_model.differential.force_tracking_enabled = enabled
 
 
 def get_globals():
