@@ -470,6 +470,26 @@ class AgimusController(Node, RobotModelsMixin):
                 return pin.Force(contact.wrench)
         return None
 
+    def _contact_is_active(self, np_sensor_msg: lfc_py_types.Sensor) -> bool:
+        """Whether force_sensor_filter.py currently reports contact on the
+        F/T frame (Contact.active — a hysteresis detector on the real
+        reading). Gates OCP force tracking: without a detected contact there
+        is no surface to react against, and chasing f_des just walks the arm
+        forward (the p2-without-wall runaway). Returns True (no gating) if
+        the contact entry is absent — the filter node isn't running — with a
+        throttled warning, since silently killing force tracking would be
+        more confusing than a loud misconfiguration.
+        """
+        for contact in np_sensor_msg.contacts:
+            if contact.name == _FORCE_CONTACT_NAME:
+                return bool(contact.active)
+        self.get_logger().warn(
+            f"No '{_FORCE_CONTACT_NAME}' contact on the sensor topic — OCP "
+            "force tracking is NOT gated on contact detection.",
+            throttle_duration_sec=5.0,
+        )
+        return True
+
     def mpc_input_callback(self, msg: MpcInput) -> None:
         """Fill the new point msg in the trajectory buffer."""
         w_traj_point = mpc_msg_to_weighted_traj_point(
@@ -591,6 +611,14 @@ class AgimusController(Node, RobotModelsMixin):
             # Do not use ROS time here because we want to measure the real computation time
             start_compute_time = time.perf_counter()
         self.np_sensor_msg: lfc_py_types.Sensor = sensor_msg_to_numpy(self.sensor_msg)
+
+        # Contact gate: don't let the force-feedback OCP track f_des until
+        # force_sensor_filter.py actually detects contact — see
+        # _contact_is_active() / OCPCrocoForceFeedbackGeneric.force_tracking_enabled.
+        if self.use_force_feedback:
+            self.ocp.force_tracking_enabled = self._contact_is_active(
+                self.np_sensor_msg
+            )
 
         # Update the input transforms required by the OCP, if any.
         self.update_transforms()
