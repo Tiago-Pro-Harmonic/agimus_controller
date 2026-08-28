@@ -65,6 +65,15 @@ from agimus_controller_ros.agimus_controller_parameters import agimus_controller
 # generate_parameter_library). Must match the `contact_name` param of
 # agimus_demo_07_fixed_tiago_pro_deburring/scripts/force_sensor_filter.py.
 _FORCE_CONTACT_NAME = "wrist_right_ft_sensor_link"
+# Hard clamp on the measured contact force before it is fed as the augmented
+# state's x0.f. Bounds the OCP's reaction to a sensor glitch or a hard slam.
+_CONTACT_FORCE_CLAMP_N = 40.0
+# Sign applied to the measured contact force before it enters x0.f, to match
+# the convention the MuJoCo testbed validated: closed_loop_mujoco.py's
+# read_force_z() returns -f_local[2] ("sign checked empirically" — the closed
+# loop converges with the minus, diverges without). force_sensor_filter.py
+# publishes +f_z when pushing (2026-08-21), so -1 here matches the testbed.
+_CONTACT_FORCE_SIGN = -1.0
 
 
 class RobotModelsMixin:
@@ -467,8 +476,31 @@ class AgimusController(Node, RobotModelsMixin):
         """
         for contact in np_sensor_msg.contacts:
             if contact.name == _FORCE_CONTACT_NAME:
-                return pin.Force(contact.wrench)
+                f = pin.Force(contact.wrench)
+                # Match the testbed's sign convention, then hard-clamp — a
+                # sensor glitch or a hard slam must not inject a wild x0.f the
+                # OCP then has to (and cannot) reconcile.
+                f.linear = np.clip(
+                    _CONTACT_FORCE_SIGN * np.asarray(f.linear),
+                    -_CONTACT_FORCE_CLAMP_N,
+                    _CONTACT_FORCE_CLAMP_N,
+                )
+                return f
         return None
+
+    def _contact_is_active(self, np_sensor_msg: lfc_py_types.Sensor) -> bool:
+        """Whether force_sensor_filter.py currently reports contact on the F/T
+        frame (Contact.active — hysteresis detector + a quasi-static gate on
+        joint speed, so no motion false positives). Drives the OCP's contact
+        regime. False (no gating) if the contact entry is absent."""
+        for contact in np_sensor_msg.contacts:
+            if contact.name == _FORCE_CONTACT_NAME:
+                return bool(contact.active)
+        self.get_logger().warn(
+            f"No '{_FORCE_CONTACT_NAME}' contact on the sensor topic.",
+            throttle_duration_sec=5.0,
+        )
+        return False
 
     def mpc_input_callback(self, msg: MpcInput) -> None:
         """Fill the new point msg in the trajectory buffer."""
@@ -591,6 +623,13 @@ class AgimusController(Node, RobotModelsMixin):
             # Do not use ROS time here because we want to measure the real computation time
             start_compute_time = time.perf_counter()
         self.np_sensor_msg: lfc_py_types.Sensor = sensor_msg_to_numpy(self.sensor_msg)
+
+        # Contact regime: on only while the sensor actually reports contact
+        # (force_sensor_filter.py's hysteresis + quasi-static gate). Off ->
+        # the soft-contact force is inert and the |f| box constraint is
+        # disabled, so a no-contact run is plain position control.
+        if self.use_force_feedback:
+            self.ocp.force_active = self._contact_is_active(self.np_sensor_msg)
 
         # Update the input transforms required by the OCP, if any.
         self.update_transforms()

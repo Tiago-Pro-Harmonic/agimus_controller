@@ -40,6 +40,14 @@ class DAMSoftContactAugmentedFwdDynamics(DifferentialActionModel):
     enabled_directions: tuple[bool, bool, bool] = (True, True, True)
     ref: str = "LOCAL"
     cost_ref: str = "LOCAL"
+    # Runtime flag (NOT yaml). Set live each MPC cycle by agimus_controller
+    # from the sensor's contact.active. While False: dam.active_contact stays
+    # False -> the soft-contact force is frozen and decoupled (as during any
+    # free motion). While True: the soft-contact dynamics run and the IAM's
+    # |f| box constraint is enabled (see IAMSoftContactAugmented). Default
+    # False = inert, so a run without contact behaves like plain position
+    # control.
+    _force_active: bool = False
 
     def __post_init__(self):
         assert force_feedback_mpc is not None, "Module force_feedback_mpc not found"
@@ -138,26 +146,19 @@ class DAMSoftContactAugmentedFwdDynamics(DifferentialActionModel):
                 else:
                     cost.cost.update(data, dam.costs.costs[cost.name].cost, pt)
 
-        # Update the desired force.
         assert self.frame_id in pt.point.forces, (
             f"forces should contains key {self.frame_id}"
         )
-        # A non-zero reference f_weight turns the soft-contact dynamics on for
-        # this node (dam.active_contact). In the guarded-move design that
-        # weight is a tiny marker (contact.w_force_marker) with f_des = 0 —
-        # the force is bounded by the IAM's |f| box constraint (force_lb/ub),
-        # not driven toward a setpoint by this cost.
-        f_weight = pt.weights.w_forces[self.frame_id][:3]
-        if np.sum(np.abs(f_weight)) > 1e-9:
-            dam.active_contact = True
-            dam.with_force_cost = True
-            dam.f_des = pt.point.forces[self.frame_id].linear[self.enabled_directions]
-            dam.f_weight = f_weight[self.enabled_directions]
-        else:
-            dam.active_contact = False
-            dam.with_force_cost = False
-            dam.f_des = np.zeros(dam.nc)
-            dam.f_weight = np.zeros(dam.nc)
+        # Contact regime is driven by the LIVE _force_active flag (set from
+        # the sensor's contact.active by agimus_controller), NOT by the
+        # reference. Applied uniformly to every node, so it never creates a
+        # boundary mid-horizon. No force-tracking cost: f_des stays 0 and the
+        # push is bounded by the IAM's |f| box constraint (active only while
+        # _force_active — see IAMSoftContactAugmented.update()).
+        dam.with_force_cost = False
+        dam.f_des = np.zeros(dam.nc)
+        dam.f_weight = np.zeros(dam.nc)
+        dam.active_contact = bool(self._force_active)
 
         if dam.with_gravity_torque_reg:
             dam.tau_grav_weight = pt.weights.w_robot_effort[0]
@@ -168,9 +169,18 @@ class IAMSoftContactAugmented(IntegratedActionModelAbstract):
     class_: T.ClassVar[str] = "IAMSoftContactAugmented"
     force_ub: T.Optional[npt.NDArray[np.float64]] = None
     force_lb: T.Optional[npt.NDArray[np.float64]] = None
+    # Runtime flag (NOT yaml), set live by agimus_controller from the sensor's
+    # contact.active. Gates the |f| box constraint: ON only while a contact is
+    # actually detected — because then f is controllable (fdot != 0) and the
+    # bound is satisfiable. With the constraint always on and f frozen
+    # (active_contact False), a noisy x0.f > f_max is an unfixable
+    # infeasibility — that is what diverged (bag 20260827_151542).
+    _force_active: bool = False
 
     def __post_init__(self):
         assert force_feedback_mpc is not None, "Module force_feedback_mpc not found"
+        # Whether the yaml asked for an explicit |f| box (force_lb/force_ub).
+        self._user_force_box = self.force_ub is not None or self.force_lb is not None
 
         if self.force_ub is not None:
             fub_len = len(self.force_ub)
@@ -186,6 +196,10 @@ class IAMSoftContactAugmented(IntegratedActionModelAbstract):
 
     def update(self, data, obj, pt: WeightedTrajectoryPoint):
         self.differential.update(data, obj.differential, pt)
+
+        # Gate the native |f| box constraint on the live contact flag.
+        if self._user_force_box:
+            obj.with_force_constraint = bool(self._force_active)
 
         if len(obj.differential.constraints.constraints) > 0:
             obj.g_lb = np.concatenate((obj.differential.g_lb, self.force_lb))
@@ -203,8 +217,6 @@ class IAMSoftContactAugmented(IntegratedActionModelAbstract):
         # — this is the "force ceiling" of the guarded-move press, not a
         # setpoint. Left off (defaults from the IAM) when the yaml is silent,
         # so other demos are unaffected.
-        user_force_box = self.force_ub is not None or self.force_lb is not None
-
         if self.force_ub is None:
             self.force_ub = np.asarray(iam.g_ub[-force_dimension:])
         else:
@@ -225,8 +237,10 @@ class IAMSoftContactAugmented(IntegratedActionModelAbstract):
             )
             self.force_lb = np.asarray(self.force_lb, dtype=float)
 
-        if user_force_box:
-            iam.with_force_constraint = True
+        if self._user_force_box:
+            # Bounds wired in now; the constraint itself is toggled per-cycle
+            # in update() via _force_active (starts off).
+            iam.with_force_constraint = False
             iam.force_lb = self.force_lb
             iam.force_ub = self.force_ub
         return iam
@@ -312,6 +326,20 @@ class OCPCrocoForceFeedbackGeneric(OCPCrocoGeneric):
     @property
     def oPc(self) -> npt.ArrayLike:
         return np.asarray(self._data.running_model.differential.oPc)
+
+    @property
+    def force_active(self) -> bool:
+        return self._data.running_model.differential._force_active
+
+    @force_active.setter
+    def force_active(self, value: bool) -> None:
+        """Set live each MPC cycle from the sensor's contact.active. True ->
+        soft-contact dynamics run + |f| box constraint enabled on every node;
+        False -> f frozen/decoupled, no constraint (plain position control)."""
+        v = bool(value)
+        for m in (self._data.running_model, self._data.terminal_model):
+            m._force_active = v
+            m.differential._force_active = v
 
 
 def get_globals():
