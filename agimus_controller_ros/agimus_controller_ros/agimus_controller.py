@@ -642,8 +642,31 @@ class AgimusController(Node, RobotModelsMixin):
             forces=self._contact_force(self.np_sensor_msg),
         )
         if self.params.constant_delay and control is not None:
-            # Compensate for delay by estimating the future state.
-            x0_traj_point = self.mpc.integrate(x0_traj_point, control)
+            # Compensate for delay by integrating the state one dt into the future.
+            if self.use_force_feedback:
+                # self.ocp.integrate() works on the augmented [q, v, f] state;
+                # x0_traj_point carries only [q, v]. Append the force component
+                # the same way setup_mpc_initial_guess() / the force warm-start do
+                # (mpc.integrate() has no concept of the augmented state).
+                enabled = self.ocp.enabled_directions
+                f = x0_traj_point.forces
+                fc = (
+                    np.zeros(sum(enabled))
+                    if f is None
+                    else (f.linear if sum(enabled) > 1 else f.linear[enabled])
+                )
+                x_next = self.ocp.integrate(
+                    np.concatenate([x0_traj_point.robot_state, fc]), control
+                )
+                nq = len(x0_traj_point.robot_configuration)
+                nv = len(x0_traj_point.robot_velocity)
+                x0_traj_point.robot_configuration = np.asarray(x_next[:nq])
+                x0_traj_point.robot_velocity = np.asarray(x_next[nq : nq + nv])
+                # predicted force x_next[nq + nv:] is dropped; x0.f is taken from
+                # the live sensor in mpc.run()'s warm-start augmentation.
+                x0_traj_point.time_ns += round(self.ocp_params.dt * 1e9)
+            else:
+                x0_traj_point = self.mpc.integrate(x0_traj_point, control)
             # Update np_sensor_msg so that the published message contains the correct initial state
             self.np_sensor_msg.joint_state.position = x0_traj_point.robot_configuration
             self.np_sensor_msg.joint_state.velocity = x0_traj_point.robot_velocity
