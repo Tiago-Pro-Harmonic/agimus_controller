@@ -55,6 +55,16 @@ from agimus_controller.trajectory import (
 )
 from agimus_controller_ros.agimus_controller_parameters import agimus_controller_params
 
+# MPC command-delay compensation (Subburaman & Stasse, "Delay Robust MPC for
+# Whole-Body Torque Control of Humanoids", Humanoids 2024): publish the OCP's
+# own predicted knot k instead of knot 0, so the control matches the time it
+# will actually act (~k*dt in the future). The solve still starts from the
+# real measurement x_real -- only the *published* knot changes -- so this does
+# NOT close the unstable re-solve-from-prediction loop that params.constant_delay
+# does. 0 = stock behaviour. Keep params.constant_delay OFF when using this.
+# TODO promote to a ROS parameter (regenerate agimus_controller_parameters).
+_APPLY_KNOT = 1
+
 
 class RobotModelsMixin:
     def init_ros_robot_creation(self) -> None:
@@ -427,9 +437,21 @@ class AgimusController(Node, RobotModelsMixin):
     def send_control_msg(self, ocp_res: OCPResults) -> None:
         """Get OCP control output and publish it."""
         assert self.np_sensor_msg is not None
+        k = _APPLY_KNOT
+        if k > 0:
+            # Delay compensation: the LFC applies (u_ff, K) around initial_state
+            # as u = u_ff + K*(x - x0). For knot k that reference must be the
+            # OCP's own predicted state x_k = states[k] (= x_real propagated k
+            # steps by the OCP dynamics), not the raw measurement. Mutate
+            # np_sensor_msg in place — it is rebuilt next cycle and nothing
+            # downstream reads it here (deepcopy chokes on an rclpy Time).
+            xk = ocp_res.states[k]
+            nq = self.rmodel.nq
+            self.np_sensor_msg.joint_state.position = np.asarray(xk[:nq])
+            self.np_sensor_msg.joint_state.velocity = np.asarray(xk[nq:])
         ctrl_msg = lfc_py_types.Control(
-            feedback_gain=ocp_res.ricatti_gains[0],
-            feedforward=ocp_res.feed_forward_terms[0].reshape(self.rmodel.nv, 1),
+            feedback_gain=ocp_res.ricatti_gains[k],
+            feedforward=ocp_res.feed_forward_terms[k].reshape(self.rmodel.nv, 1),
             initial_state=self.np_sensor_msg,
         )
         self.control_publisher.publish(control_numpy_to_msg(ctrl_msg))
