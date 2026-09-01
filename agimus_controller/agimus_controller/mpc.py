@@ -49,16 +49,17 @@ class MPC(object):
         assert self._warm_start is not None
         timer1 = time.perf_counter_ns()
 
-        # Ensure that you have enough data in the buffer.
-        if len(self._buffer) < self._ocp.n_controls + 1:
-            return None
-
         # Advance the reference by *wall time*, not by one buffer slot per call:
         # extract the horizon at the current playback position so a publisher
         # that fills the buffer slower/faster than the solver rate no longer
         # dilates the trajectory. Falls back to the plain index buffer when no
         # wall clock is supplied (current_time_ns <= 0).
         if current_time_ns and current_time_ns > 0:
+            # Only need a single point: horizon_at holds it for the whole
+            # horizon on underrun (e.g. once the trajectory has been fully
+            # published and the robot is dwelling at the last waypoint).
+            if len(self._buffer) < 1:
+                return None
             if self._playback_t0_wall_ns is None:
                 self._playback_t0_wall_ns = current_time_ns
                 self._playback_t0_traj_ns = self._buffer[0].point.time_ns
@@ -80,6 +81,8 @@ class MPC(object):
                 self._underrun_logged = True
         else:
             t_traj_ns = None
+            if len(self._buffer) < self._ocp.n_controls + 1:
+                return None
             reference_trajectory = self._extract_horizon_from_buffer()
 
         self._ocp.set_reference_weighted_trajectory(reference_trajectory)
