@@ -554,7 +554,10 @@ class AgimusController(Node, RobotModelsMixin):
         # If size is inferior to `1.5 * required size`, send a warning message. Note that the
         # ratio here must be strictly inferior to the ratio that triggers starting.
         # If size is inferior to the required size, send an error message and return.
-        if not self.buffer_has_enough_data(1.5):
+        _mpc_holding = self.mpc is not None and getattr(
+            self.mpc, "_underrun_logged", False
+        )
+        if not self.buffer_has_enough_data(1.5) and not _mpc_holding:
             if self.buffer_has_enough_data(1):
                 self.get_logger().warn(
                     f"MPC is running and the buffer size becomes low. Current size {len(self.traj_buffer)}",
