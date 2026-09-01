@@ -23,6 +23,7 @@ from tf2_ros.transform_listener import TransformListener
 import linear_feedback_controller_msgs_py.lfc_py_types as lfc_py_types
 from linear_feedback_controller_msgs_py.numpy_conversions import (
     sensor_msg_to_numpy,
+    sensor_numpy_to_msg,
     control_numpy_to_msg,
 )
 from linear_feedback_controller_msgs.msg import Control, Sensor
@@ -271,6 +272,19 @@ class AgimusController(Node, RobotModelsMixin):
                 reliability=ReliabilityPolicy.BEST_EFFORT,
             ),
         )
+        if _APPLY_KNOT > 0:
+            # Delay compensation, exact u3: alongside /control (which carries
+            # knot _APPLY_KNOT), publish the NEXT knot's state xs[_APPLY_KNOT+1]
+            # so the LFC can interpolate its feedback reference across the MPC
+            # cycle instead of holding it (Subburaman & Stasse, x_tilde_{k+1,k+2}).
+            self.mpc_x_next_publisher = self.create_publisher(
+                Sensor,
+                "mpc_x_next",
+                qos_profile=QoSProfile(
+                    depth=10,
+                    reliability=ReliabilityPolicy.BEST_EFFORT,
+                ),
+            )
         if self.params.publish_buffer_size:
             self.ocp_buffer_size_pub = self.create_publisher(
                 Int32,
@@ -429,6 +443,7 @@ class AgimusController(Node, RobotModelsMixin):
         """Get OCP control output and publish it."""
         assert self.np_sensor_msg is not None
         k = _APPLY_KNOT
+        nq = self.rmodel.nq
         if k > 0:
             # Delay compensation: the LFC applies (u_ff, K) around initial_state
             # as u = u_ff + K*(x - x0). For knot k that reference must be the
@@ -437,7 +452,6 @@ class AgimusController(Node, RobotModelsMixin):
             # np_sensor_msg in place — it is rebuilt next cycle and nothing
             # downstream reads it here (deepcopy chokes on an rclpy Time).
             xk = ocp_res.states[k]
-            nq = self.rmodel.nq
             self.np_sensor_msg.joint_state.position = np.asarray(xk[:nq])
             self.np_sensor_msg.joint_state.velocity = np.asarray(xk[nq:])
         ctrl_msg = lfc_py_types.Control(
@@ -446,6 +460,15 @@ class AgimusController(Node, RobotModelsMixin):
             initial_state=self.np_sensor_msg,
         )
         self.control_publisher.publish(control_numpy_to_msg(ctrl_msg))
+        if k > 0 and k + 1 < len(ocp_res.states):
+            # Next knot x_{k+1} for the LFC's reference interpolation. Fresh
+            # conversion (not the mutated np_sensor_msg) so its header stamp
+            # still matches this cycle's /control initial_state stamp.
+            x_next = sensor_msg_to_numpy(self.sensor_msg)
+            xkn = ocp_res.states[k + 1]
+            x_next.joint_state.position = np.asarray(xkn[:nq])
+            x_next.joint_state.velocity = np.asarray(xkn[nq:])
+            self.mpc_x_next_publisher.publish(sensor_numpy_to_msg(x_next))
 
     def initialization_callback(self) -> None:
         if self.sensor_msg is None:
