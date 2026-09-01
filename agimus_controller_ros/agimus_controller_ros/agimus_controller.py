@@ -214,6 +214,9 @@ class AgimusController(Node, RobotModelsMixin):
         self.rmodel = None
         self.mpc = None
         self.np_sensor_msg = None
+        # Highest MpcInput.id seen so far — a non-increasing id marks a fresh
+        # reference trajectory (the publisher restarts its counter at 0).
+        self._last_mpc_input_id = -1
         # Stores the OCP result to be able to publish it
         # at next iteration, when using a constant delay
         self._ocp_res = None
@@ -409,10 +412,27 @@ class AgimusController(Node, RobotModelsMixin):
         self.sensor_msg = sensor_msg
 
     def mpc_input_callback(self, msg: MpcInput) -> None:
-        """Fill the new point msg in the trajectory buffer."""
-        w_traj_point = mpc_msg_to_weighted_traj_point(
-            msg, self.get_clock().now().nanoseconds
-        )
+        """Fill the new point msg in the trajectory buffer.
+
+        The point is stamped with its *trajectory* time (``id * ocp.dt``, not
+        the wall-clock arrival time) so that ``MPC.run`` can advance the
+        reference by elapsed wall time instead of one buffer slot per solve.
+        This requires the publisher's sampling period to equal ``ocp.dt``.
+        """
+        dt_ns = int(round(self.ocp_params.dt * 1e9))
+
+        # Detect a restarted reference trajectory (id counter back to/near 0).
+        if msg.id <= self._last_mpc_input_id and len(self.traj_buffer) > 0:
+            self.get_logger().info(
+                f"New reference trajectory (id {msg.id} <= last "
+                f"{self._last_mpc_input_id}) — clearing the buffer."
+            )
+            self.traj_buffer.clear()
+            if self.mpc is not None:
+                self.mpc.reset_playback()
+        self._last_mpc_input_id = msg.id
+
+        w_traj_point = mpc_msg_to_weighted_traj_point(msg, msg.id * dt_ns)
         self.traj_buffer.append(w_traj_point)
         self.params.ocp.effector_frame_name = msg.ee_inputs[0].frame_id
         self.effector_frame_name = msg.ee_inputs[0].frame_id
