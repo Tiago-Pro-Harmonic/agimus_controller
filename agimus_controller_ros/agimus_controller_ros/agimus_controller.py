@@ -62,6 +62,15 @@ from agimus_controller_ros.agimus_controller_parameters import agimus_controller
 # TODO promote to a ROS parameter (regenerate agimus_controller_parameters).
 _APPLY_KNOT = 1
 
+# Experiment (2026-09-02): use WarmStartReference (the HPP trajectory) as the
+# solver guess EVERY cycle instead of WarmStartShiftPreviousSolution. The
+# shift-previous warm start re-injects the drifted state each cycle, which
+# sustains the OCP "phantom velocity" (a nullspace drift toward q_hpp the arm
+# can't execute). Re-anchoring the guess to the drift-free HPP traj (v_hpp=0
+# at rest) each solve should let it converge near v=0. Cost: a colder guess
+# during fast motion -> more solver iterations (we have max_iter + time budget).
+_HPP_WARMSTART_EVERY_CYCLE = True
+
 
 class RobotModelsMixin:
     def init_ros_robot_creation(self) -> None:
@@ -377,8 +386,12 @@ class AgimusController(Node, RobotModelsMixin):
         if len(self.ocp.input_transforms) > 0:
             self.initialize_tf_listener()
 
-        self._ws_shift = WarmStartShiftPreviousSolution()
-        self._ws_shift.setup(self.robot_models, self.ocp_params)
+        if _HPP_WARMSTART_EVERY_CYCLE:
+            self._ws_shift = WarmStartReference()
+            self._ws_shift.setup(self.robot_models._robot_model)
+        else:
+            self._ws_shift = WarmStartShiftPreviousSolution()
+            self._ws_shift.setup(self.robot_models, self.ocp_params)
 
         self.mpc = MPC()
         self.mpc.setup(ocp=self.ocp, warm_start=self._ws_shift, buffer=self.traj_buffer)
