@@ -62,6 +62,16 @@ from agimus_controller_ros.agimus_controller_parameters import agimus_controller
 # TODO promote to a ROS parameter (regenerate agimus_controller_parameters).
 _APPLY_KNOT = 1
 
+# Experiment (2026-09-02): the OCP's xs[k].v carries a nullspace "phantom
+# velocity" (~0.4 rad/s at rest — a redundancy-resolution drift toward q_final
+# that the arm can't execute). Feeding it to the LFC makes K_v fight a
+# fictitious target -> ~3 N.m static bias + chatter. When True, the published
+# knot keeps the delay-advanced POSITION xs[k].q but the velocity reference
+# stays at the measured value xs[0].v the OCP solved from -> position-only
+# delay compensation, feedback velocity error is real. Only affects /control
+# (u1 mode). No effect if _APPLY_KNOT == 0.
+_KNOT_VELOCITY_FROM_MEASURED = True
+
 
 class RobotModelsMixin:
     def init_ros_robot_creation(self) -> None:
@@ -473,7 +483,12 @@ class AgimusController(Node, RobotModelsMixin):
             # downstream reads it here (deepcopy chokes on an rclpy Time).
             xk = ocp_res.states[k]
             self.np_sensor_msg.joint_state.position = np.asarray(xk[:nq])
-            self.np_sensor_msg.joint_state.velocity = np.asarray(xk[nq:])
+            if _KNOT_VELOCITY_FROM_MEASURED:
+                self.np_sensor_msg.joint_state.velocity = np.asarray(
+                    ocp_res.states[0][nq:]
+                )
+            else:
+                self.np_sensor_msg.joint_state.velocity = np.asarray(xk[nq:])
         ctrl_msg = lfc_py_types.Control(
             feedback_gain=ocp_res.ricatti_gains[k],
             feedforward=ocp_res.feed_forward_terms[k].reshape(self.rmodel.nv, 1),
