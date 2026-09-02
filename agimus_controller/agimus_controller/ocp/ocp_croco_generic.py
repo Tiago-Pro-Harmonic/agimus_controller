@@ -550,6 +550,84 @@ class ResidualDistanceCollision2(ResidualDistanceCollisionBase):
         return colmpc.ResidualDistanceCollision2(data.state, data.actuation.nu, id)
 
 
+class _NullspaceVelocityResidual(crocoddyl.ResidualModelAbstract):
+    """r(x) = N(q) . (v - vref), with N = I - J^+ J the (damped) null-space
+    projector of the given frame's 6D Jacobian. Penalises the joint velocity
+    that does NOT move that frame -- i.e. the redundant "self-motion" of a
+    kinematically redundant arm. Damps it toward vref (the plan velocity),
+    which is 0 at rest -> kills the OCP "phantom velocity" at the source,
+    without touching the task-space feedback gains (N is orthogonal to the
+    task). Jacobian: dr/dv = N ; dr/dq ~= 0 (the dN/dq term is dropped, the
+    usual approximation for MPC)."""
+
+    def __init__(self, state, frame_id: int, damping: float = 1e-3):
+        nv = state.nv
+        crocoddyl.ResidualModelAbstract.__init__(
+            self, state, nv, state.nv, True, True, False
+        )  # nr=nv, nu, q_dependent, v_dependent, u_dependent
+        self._pin_model = state.pinocchio
+        self._pin_data = self._pin_model.createData()
+        self._frame_id = frame_id
+        self._damp2 = damping * damping
+        self._eye6 = np.eye(6)
+        self._eye_nv = np.eye(nv)
+        self.vref = np.zeros(nv)
+
+    def _projector(self, q):
+        J = pin.computeFrameJacobian(
+            self._pin_model, self._pin_data, q, self._frame_id,
+            pin.ReferenceFrame.LOCAL_WORLD_ALIGNED,
+        )  # 6 x nv
+        Jpinv = J.T @ np.linalg.solve(J @ J.T + self._damp2 * self._eye6, self._eye6)
+        return self._eye_nv - Jpinv @ J
+
+    def calc(self, data, x, u=None):
+        nq = self._pin_model.nq
+        q, v = x[:nq], x[nq:]
+        data.r[:] = self._projector(q) @ (v - self.vref)
+
+    def calcDiff(self, data, x, u=None):
+        nq, nv = self._pin_model.nq, self._pin_model.nv
+        q = x[:nq]
+        N = self._projector(q)
+        data.Rx[:, :nv] = 0.0
+        data.Rx[:, nv:] = N
+
+
+@dataclasses.dataclass
+class ResidualModelNullspaceVelocity(ResidualModel):
+    """Config wrapper for _NullspaceVelocityResidual.
+
+    yaml fields:
+      frame_id : the task frame whose Jacobian defines the null space.
+      damping  : pseudo-inverse regularisation (raise near singularities).
+      weight   : the cost gain, INDEPENDENT of w_qdot. Set the yaml cost with
+                 `update: true` and a scalar `weights: 1.0` in the activation
+                 (it is overwritten per cycle by this value).
+      track_plan_velocity : if true, damp N.v toward the plan velocity v_hpp
+                 (safe if the HPP path intentionally reconfigures the elbow);
+                 if false, damp toward 0.
+    """
+
+    class_: T.ClassVar[str] = "ResidualModelNullspaceVelocity"
+    frame_id: T.Union[str, int] = "gripper_right_tool_holder"
+    damping: float = 1e-3
+    weight: float = 30.0
+    track_plan_velocity: bool = True
+
+    def update(self, data, obj, pt: WeightedTrajectoryPoint):
+        if self.track_plan_velocity and pt.point.robot_velocity is not None:
+            obj.vref = np.asarray(pt.point.robot_velocity)
+        else:
+            obj.vref[:] = 0.0
+        return self.weight * np.ones(data.state.nv)
+
+    def build(self, data: BuildData):
+        return _NullspaceVelocityResidual(
+            data.state, get_frame_id(data.state, self.frame_id), self.damping
+        )
+
+
 @dataclasses.dataclass
 class CostModel:
     residual: ResidualModel
