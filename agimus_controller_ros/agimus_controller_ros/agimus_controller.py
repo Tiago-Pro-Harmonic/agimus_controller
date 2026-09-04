@@ -23,7 +23,6 @@ from tf2_ros.transform_listener import TransformListener
 import linear_feedback_controller_msgs_py.lfc_py_types as lfc_py_types
 from linear_feedback_controller_msgs_py.numpy_conversions import (
     sensor_msg_to_numpy,
-    sensor_numpy_to_msg,
     control_numpy_to_msg,
 )
 from linear_feedback_controller_msgs.msg import Control, Sensor
@@ -55,16 +54,6 @@ from agimus_controller.trajectory import (
     TrajectoryPoint,
 )
 from agimus_controller_ros.agimus_controller_parameters import agimus_controller_params
-
-# MPC command-delay compensation (Subburaman & Stasse, "Delay Robust MPC for
-# Whole-Body Torque Control of Humanoids", Humanoids 2024): publish the OCP's
-# own predicted knot k instead of knot 0, so the control matches the time it
-# will actually act (~k*dt in the future). The solve still starts from the
-# real measurement x_real -- only the *published* knot changes -- so this does
-# NOT close the unstable re-solve-from-prediction loop that params.constant_delay
-# does. 0 = stock behaviour. Keep params.constant_delay OFF when using this.
-# TODO promote to a ROS parameter (regenerate agimus_controller_parameters).
-_APPLY_KNOT = 1
 
 
 class RobotModelsMixin:
@@ -284,19 +273,6 @@ class AgimusController(Node, RobotModelsMixin):
                 reliability=ReliabilityPolicy.BEST_EFFORT,
             ),
         )
-        if _APPLY_KNOT > 0:
-            # Delay compensation, exact u3: alongside /control (which carries
-            # knot _APPLY_KNOT), publish the NEXT knot's state xs[_APPLY_KNOT+1]
-            # so the LFC can interpolate its feedback reference across the MPC
-            # cycle instead of holding it (Subburaman & Stasse, x_tilde_{k+1,k+2}).
-            self.mpc_x_next_publisher = self.create_publisher(
-                Sensor,
-                "mpc_x_next",
-                qos_profile=QoSProfile(
-                    depth=10,
-                    reliability=ReliabilityPolicy.BEST_EFFORT,
-                ),
-            )
         if self.params.publish_buffer_size:
             self.ocp_buffer_size_pub = self.create_publisher(
                 Int32,
@@ -471,8 +447,11 @@ class AgimusController(Node, RobotModelsMixin):
     def send_control_msg(self, ocp_res: OCPResults) -> None:
         """Get OCP control output and publish it."""
         assert self.np_sensor_msg is not None
-        k = _APPLY_KNOT
+        # See params.apply_knot's description (MPC command-delay compensation).
+        k = self.params.apply_knot
         nq = self.rmodel.nq
+        nv = self.rmodel.nv
+        next_states = []
         if k > 0:
             # Delay compensation: the LFC applies (u_ff, K) around initial_state
             # as u = u_ff + K*(x - x0). For knot k that reference must be the
@@ -482,22 +461,28 @@ class AgimusController(Node, RobotModelsMixin):
             # downstream reads it here (deepcopy chokes on an rclpy Time).
             xk = ocp_res.states[k]
             self.np_sensor_msg.joint_state.position = np.asarray(xk[:nq])
-            self.np_sensor_msg.joint_state.velocity = np.asarray(xk[nq:])
+            self.np_sensor_msg.joint_state.velocity = np.asarray(xk[nq : nq + nv])
+            if k + 1 < len(ocp_res.states):
+                # Next knot x_{k+1}, carried on Control.next_states for the
+                # LFC's reference interpolation. Stamped one OCP period after
+                # this cycle's initial_state: the LFC derives the actual
+                # interpolation period from the two stamps, it does not
+                # assume a fixed one.
+                x_next = sensor_msg_to_numpy(self.sensor_msg)
+                x_next.stamp = self.np_sensor_msg.stamp + Duration(
+                    nanoseconds=round(self.ocp_params.dt * 1e9)
+                )
+                xkn = ocp_res.states[k + 1]
+                x_next.joint_state.position = np.asarray(xkn[:nq])
+                x_next.joint_state.velocity = np.asarray(xkn[nq : nq + nv])
+                next_states = [x_next]
         ctrl_msg = lfc_py_types.Control(
             feedback_gain=ocp_res.ricatti_gains[k],
-            feedforward=ocp_res.feed_forward_terms[k].reshape(self.rmodel.nv, 1),
+            feedforward=ocp_res.feed_forward_terms[k].reshape(nv, 1),
             initial_state=self.np_sensor_msg,
+            next_states=next_states,
         )
         self.control_publisher.publish(control_numpy_to_msg(ctrl_msg))
-        if k > 0 and k + 1 < len(ocp_res.states):
-            # Next knot x_{k+1} for the LFC's reference interpolation. Fresh
-            # conversion (not the mutated np_sensor_msg) so its header stamp
-            # still matches this cycle's /control initial_state stamp.
-            x_next = sensor_msg_to_numpy(self.sensor_msg)
-            xkn = ocp_res.states[k + 1]
-            x_next.joint_state.position = np.asarray(xkn[:nq])
-            x_next.joint_state.velocity = np.asarray(xkn[nq:])
-            self.mpc_x_next_publisher.publish(sensor_numpy_to_msg(x_next))
 
     def initialization_callback(self) -> None:
         if self.sensor_msg is None:
