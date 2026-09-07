@@ -71,13 +71,16 @@ from agimus_controller_ros.agimus_controller_parameters import agimus_controller
 _FORCE_CONTACT_NAME = "wrist_right_ft_sensor_link"
 # Hard clamp on the measured contact force before it is fed as the augmented
 # state's x0.f. Bounds the OCP's reaction to a sensor glitch or a hard slam.
-_CONTACT_FORCE_CLAMP_N = 40.0
-# Sign applied to the measured contact force before it enters x0.f, to match
-# the convention the MuJoCo testbed validated: closed_loop_mujoco.py's
-# read_force_z() returns -f_local[2] ("sign checked empirically" — the closed
-# loop converges with the minus, diverges without). force_sensor_filter.py
-# publishes +f_z when pushing (2026-08-21), so -1 here matches the testbed.
-_CONTACT_FORCE_SIGN = -1.0
+_CONTACT_FORCE_CLAMP_N = 200.0
+# Sign applied to the measured contact force before it enters x0.f. +1 (raw
+# sensor-frame convention) so x0.f == Control.initial_state.contacts[k].wrench.z
+# exactly -- the LFC's augmented force channel (linear-feedback-controller
+# contact_force_feedback) reads f0 straight from that same field, and needs
+# it in the same sign as the live measured force it compares against. The
+# MuJoCo testbed's -1 (closed_loop_mujoco.py's read_force_z()) was only ever
+# validated for the OCP's own open-loop convergence, before the LFC carried
+# any force feedback -- doesn't apply here.
+_CONTACT_FORCE_SIGN = 1.0
 
 
 class RobotModelsMixin:
