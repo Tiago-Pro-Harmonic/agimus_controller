@@ -702,12 +702,27 @@ class AgimusController(Node, RobotModelsMixin):
         # Update the input transforms required by the OCP, if any.
         self.update_transforms()
 
+        force = self._contact_force(self.np_sensor_msg)
+        if force is None and self.use_force_feedback:
+            # See _contact_force's docstring: absent e.g. when running
+            # without force_sensor_filter.py (bringup's use_force_feedback
+            # launch arg off), independent of self.use_force_feedback (which
+            # is auto-detected from the OCP yaml and always True for an
+            # augmented OCP). Degrade to zero force rather than let the
+            # warm-start's `force.linear` crash on None -- same fallback
+            # setup_mpc_initial_guess() already uses.
+            self.get_logger().warn(
+                f"No '{_FORCE_CONTACT_NAME}' contact — using zero force for "
+                "x0 (is force_sensor_filter.py / sensor_with_force running?).",
+                throttle_duration_sec=5.0,
+            )
+            force = pin.Force.Zero()
         x0_traj_point = TrajectoryPoint(
             time_ns=self.get_clock().now().nanoseconds,
             robot_configuration=self.np_sensor_msg.joint_state.position,
             robot_velocity=self.np_sensor_msg.joint_state.velocity,
             robot_acceleration=np.zeros_like(self.np_sensor_msg.joint_state.velocity),
-            forces=self._contact_force(self.np_sensor_msg),
+            forces=force,
         )
         if self.params.constant_delay and control is not None:
             # Compensate for delay by integrating the state one dt into the future.
