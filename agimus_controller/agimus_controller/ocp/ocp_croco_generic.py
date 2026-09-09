@@ -549,6 +549,103 @@ class ResidualDistanceCollision2(ResidualDistanceCollisionBase):
         return colmpc.ResidualDistanceCollision2(data.state, data.actuation.nu, id)
 
 
+class _NullspacePositionResidual(crocoddyl.ResidualModelAbstract):
+    """r(x) = N(q) . (q - qref), with N = I - J^+ J the (damped) null-space
+    projector of the given frame's 6D Jacobian.
+
+    Position counterpart of _NullspaceVelocityResidual (see
+    ResidualModelNullspaceVelocity, tested 2026-09-02, bag
+    20260902_092617_u1_nullspaceVel): that one damped the redundant
+    self-motion *velocity* toward 0 (or the plan velocity), which halved
+    the phantom velocity at node 1 but doubled the redundant-DOF posture
+    drift -- damping a velocity can't tell "wanted correction toward the
+    reference posture" from "unwanted drift" apart, since both are
+    self-motion velocities. This residual sidesteps that: instead of
+    penalising a velocity, it gives the redundant DOF an explicit target
+    -- the planned reference posture, projected into the null space -- so
+    there's no ambiguity about which direction is "correction" vs "drift".
+
+    Assumes a fixed-base state (no free-flyer): nq == nv, and configuration
+    difference is plain subtraction. Matches this arm's non-augmented
+    [q, v] state (ocp_definition_file_nonaugmented.yaml) -- not meant for
+    the augmented [q, v, f] state, where nq/nv bookkeeping around the extra
+    force dimension isn't handled here.
+
+    Jacobian: dr/dq ~= N (the dN/dq . (q - qref) term is dropped, the same
+    approximation _NullspaceVelocityResidual makes for its own dr/dq)."""
+
+    def __init__(self, state, frame_id: int, damping: float = 1e-3):
+        nv = state.nv
+        crocoddyl.ResidualModelAbstract.__init__(
+            self, state, nv, state.nv, True, False, False
+        )  # nr=nv, nu, q_dependent, v_dependent, u_dependent
+        self._pin_model = state.pinocchio
+        self._pin_data = self._pin_model.createData()
+        self._frame_id = frame_id
+        self._damp2 = damping * damping
+        self._eye6 = np.eye(6)
+        self._eye_nv = np.eye(nv)
+        self.qref = np.zeros(nv)
+
+    def _projector(self, q):
+        J = pin.computeFrameJacobian(
+            self._pin_model, self._pin_data, q, self._frame_id,
+            pin.ReferenceFrame.LOCAL_WORLD_ALIGNED,
+        )  # 6 x nv
+        Jpinv = J.T @ np.linalg.solve(J @ J.T + self._damp2 * self._eye6, self._eye6)
+        return self._eye_nv - Jpinv @ J
+
+    def calc(self, data, x, u=None):
+        nq = self._pin_model.nq
+        q = x[:nq]
+        data.r[:] = self._projector(q) @ (q - self.qref)
+
+    def calcDiff(self, data, x, u=None):
+        nq = self._pin_model.nq
+        q = x[:nq]
+        N = self._projector(q)
+        data.Rx[:, :nq] = N
+        data.Rx[:, nq:] = 0.0
+
+
+@dataclasses.dataclass
+class ResidualModelNullspacePosition(ResidualModel):
+    """Config wrapper for _NullspacePositionResidual.
+
+    yaml fields:
+      frame_id : the task frame whose Jacobian defines the null space.
+      damping  : pseudo-inverse regularisation (raise near singularities).
+      weight   : the cost gain, independent of the general state_reg weight
+                 (set the yaml cost with `update: true` and a scalar
+                 `weights: 1.0` in the activation; it is overwritten per
+                 cycle by this value, same convention as
+                 ResidualModelNullspaceVelocity).
+
+    qref always tracks the planned reference posture (pt.point.robot_state's
+    position part -- the same reference ResidualModelState already uses).
+    There's no "track_plan_position" toggle the way the velocity residual
+    has "track_plan_velocity": unlike 0 for velocity (a physically
+    meaningful "stay still" target), there's no posture-independent target
+    that would make sense here, so this residual only adds a second,
+    independently-weighted pull toward that same reference, restricted to
+    the null-space direction.
+    """
+
+    class_: T.ClassVar[str] = "ResidualModelNullspacePosition"
+    frame_id: T.Union[str, int] = "gripper_right_tool_holder"
+    damping: float = 1e-3
+    weight: float = 30.0
+
+    def update(self, data, obj, pt: WeightedTrajectoryPoint):
+        obj.qref = np.asarray(pt.point.robot_state[: len(obj.qref)])
+        return self.weight * np.ones(len(obj.qref))
+
+    def build(self, data: BuildData):
+        return _NullspacePositionResidual(
+            data.state, get_frame_id(data.state, self.frame_id), self.damping
+        )
+
+
 @dataclasses.dataclass
 class CostModel:
     residual: ResidualModel
