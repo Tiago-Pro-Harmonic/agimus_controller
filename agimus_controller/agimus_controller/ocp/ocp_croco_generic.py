@@ -913,8 +913,11 @@ class OCPCrocoGeneric(OCPBaseCroco):
         """
         for cost in self._data.running_model.differential.costs:
             # collision avoidance costs only has changes in weights, not references.
+            # ResidualModelNullspacePosition carries its reference as `qref`
+            # (not the crocoddyl `.reference` attribute this loop reads).
             if cost.update and not isinstance(
-                cost.cost.residual, ResidualDistanceCollisionBase
+                cost.cost.residual,
+                (ResidualDistanceCollisionBase, ResidualModelNullspacePosition),
             ):
                 self._debug_data.references.append((cost.name, None))
             if cost.publish_residual:
