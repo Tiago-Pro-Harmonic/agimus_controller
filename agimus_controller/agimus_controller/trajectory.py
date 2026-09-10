@@ -93,6 +93,11 @@ class TrajectoryPointWeights:
     w_end_effector_poses: dict[npt.NDArray[np.float64]] | None = None
     w_end_effector_velocities: dict[npt.NDArray[np.float64]] | None = None
     w_collision_avoidance: np.float64 | None = None
+    # Cost gain for ResidualModelNullspacePosition (ocp_croco_generic.py) --
+    # pulls a kinematically-redundant DOF toward the planned reference
+    # posture, restricted to the task's null space. None = fall back to the
+    # residual's own yaml-configured `weight` (see its update()).
+    w_nullspace_pos: np.float64 | None = None
 
     @property
     def w_robot_state(self) -> npt.NDArray[np.float64]:
@@ -153,6 +158,9 @@ class TrajectoryPointWeights:
             return False
 
         if self.w_collision_avoidance != other.w_collision_avoidance:
+            return False
+
+        if self.w_nullspace_pos != other.w_nullspace_pos:
             return False
 
         return True

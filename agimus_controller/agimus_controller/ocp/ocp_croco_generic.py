@@ -566,10 +566,17 @@ class _NullspacePositionResidual(crocoddyl.ResidualModelAbstract):
     there's no ambiguity about which direction is "correction" vs "drift".
 
     Assumes a fixed-base state (no free-flyer): nq == nv, and configuration
-    difference is plain subtraction. Matches this arm's non-augmented
-    [q, v] state (ocp_definition_file_nonaugmented.yaml) -- not meant for
-    the augmented [q, v, f] state, where nq/nv bookkeeping around the extra
-    force dimension isn't handled here.
+    difference is plain subtraction. Works for BOTH the non-augmented
+    [q, v] state (ocp_definition_file_nonaugmented.yaml) and the augmented
+    [q, v, f] one (ocp_definition_file.yaml, force_feedback_mpc's
+    StateSoftContact) -- checked against force_feedback_mpc/src/softcontact/
+    state.cpp 2026-09-10: StateSoftContact sets nv_/nq_ to the plain robot's
+    model->nv/model->nq (7 here), NOT the augmented ny_/ndy_ (15) -- so
+    `state.nv`/`state.pinocchio.nq` used below already give the right,
+    non-augmented sizes either way, and calc()/calcDiff() only ever touch
+    x[:nq] and data.Rx[:, :nq], leaving whatever comes after (v, or v+f)
+    alone. Untested against the actual augmented OCP though -- verified by
+    reading the state class, not by running it.
 
     Jacobian: dr/dq ~= N (the dN/dq . (q - qref) term is dropped, the same
     approximation _NullspaceVelocityResidual makes for its own dr/dq)."""
@@ -615,11 +622,14 @@ class ResidualModelNullspacePosition(ResidualModel):
     yaml fields:
       frame_id : the task frame whose Jacobian defines the null space.
       damping  : pseudo-inverse regularisation (raise near singularities).
-      weight   : the cost gain, independent of the general state_reg weight
-                 (set the yaml cost with `update: true` and a scalar
-                 `weights: 1.0` in the activation; it is overwritten per
-                 cycle by this value, same convention as
-                 ResidualModelNullspaceVelocity).
+      weight   : fallback cost gain, used only when the live one
+                 (pt.weights.w_nullspace_pos, set via MpcInput.w_nullspace_pos
+                 -- same channel as w_qdot/w_frame_*, editable without a
+                 rebuild) isn't provided (None). Keep the yaml cost with
+                 `update: true` and a scalar `weights: 1.0` in the
+                 activation; it is overwritten per cycle by whichever of
+                 the two applies, same convention as
+                 ResidualModelNullspaceVelocity.
 
     qref always tracks the planned reference posture (pt.point.robot_state's
     position part -- the same reference ResidualModelState already uses).
@@ -638,7 +648,10 @@ class ResidualModelNullspacePosition(ResidualModel):
 
     def update(self, data, obj, pt: WeightedTrajectoryPoint):
         obj.qref = np.asarray(pt.point.robot_state[: len(obj.qref)])
-        return self.weight * np.ones(len(obj.qref))
+        w = pt.weights.w_nullspace_pos
+        if w is None:
+            w = self.weight
+        return w * np.ones(len(obj.qref))
 
     def build(self, data: BuildData):
         return _NullspacePositionResidual(

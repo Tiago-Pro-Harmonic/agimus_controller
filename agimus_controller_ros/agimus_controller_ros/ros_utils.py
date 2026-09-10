@@ -198,6 +198,7 @@ def mpc_msg_to_weighted_traj_point(
         w_robot_acceleration=np.array(msg.w_qddot, dtype=np.float64),
         w_robot_effort=np.array(msg.w_robot_effort, dtype=np.float64),
         w_collision_avoidance=msg.w_collision_avoidance,
+        w_nullspace_pos=msg.w_nullspace_pos,
         w_end_effector_poses={data.frame_id: data.w_pose for data in msg.ee_inputs},
         w_end_effector_velocities={
             data.frame_id: data.w_twist for data in msg.ee_inputs
@@ -273,6 +274,7 @@ def weighted_traj_point_to_mpc_msg(w_traj_point: WeightedTrajectoryPoint) -> Mpc
     )
 
     w_col = w_traj_point.weights.w_collision_avoidance
+    w_nsp = w_traj_point.weights.w_nullspace_pos
 
     return MpcInput(
         id=w_traj_point.point.id,
@@ -287,6 +289,7 @@ def weighted_traj_point_to_mpc_msg(w_traj_point: WeightedTrajectoryPoint) -> Mpc
         w_qddot=list(w_traj_point.weights.w_robot_acceleration),
         w_robot_effort=list(w_traj_point.weights.w_robot_effort),
         w_collision_avoidance=w_col if w_col is not None else 0.0,
+        w_nullspace_pos=w_nsp if w_nsp is not None else 0.0,
         # End Effectors
         ee_inputs=[_generate_mpc_ee_input(frame_id) for frame_id in frame_ids],
     )
